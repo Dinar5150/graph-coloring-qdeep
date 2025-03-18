@@ -14,8 +14,9 @@
 
 import matplotlib
 import networkx as nx
-from dimod import ConstrainedQuadraticModel, Binary, quicksum
-from dwave.system import LeapHybridCQMSampler
+import dimod
+from dimod import BinaryQuadraticModel
+from dwave.samplers import SimulatedAnnealingSampler
 
 try:
     import matplotlib.pyplot as plt
@@ -35,51 +36,76 @@ def build_graph(num_nodes):
 
     return G, pos
 
-def build_cqm(G, num_colors):
-    """Build CQM model."""
+def build_bqm(G, num_colors):
+    """Build BQM model for graph coloring.
+    
+    In the BQM formulation:
+    - Each node-color combination is a binary variable
+    - We penalize:
+      1. Nodes without exactly one color
+      2. Adjacent nodes with the same color
+    """
 
-    print("\nBuilding constrained quadratic model...")
+    print("\nBuilding binary quadratic model...")
 
-    # Initialize the CQM object
-    cqm = ConstrainedQuadraticModel()
-
-    # Build CQM variables
-    colors = {n: {c: Binary((n, c)) for c in range(num_colors)} for n in G.nodes}
-
-    # Add constraint to make variables discrete
-    for n in G.nodes():
-        cqm.add_discrete([(n, c) for c in range(num_colors)])
-  
-    # Build the constraints: edges have different color end points
+    # Initialize the BQM
+    bqm = BinaryQuadraticModel('BINARY')
+    
+    # Create variables for each node-color pair
+    # Format: (node, color)
+    
+    # Constraint: Each node must have exactly one color
+    for node in G.nodes:
+        # Add variables for this node (one per color)
+        node_variables = [(node, color) for color in range(num_colors)]
+        
+        # Add constraint: exactly one color per node
+        # 1. Linear terms to encourage assigning at least one color
+        for v in node_variables:
+            bqm.add_variable(v, -1)
+            
+        # 2. Quadratic terms to penalize assigning more than one color
+        for i, v1 in enumerate(node_variables):
+            for v2 in node_variables[i+1:]:
+                bqm.add_interaction(v1, v2, 2)  # Penalize having both colors
+    
+    # Constraint: Adjacent nodes cannot have the same color
     for u, v in G.edges:
-        for c in range(num_colors):
-            cqm.add_constraint(colors[u][c]*colors[v][c] == 0)
+        for color in range(num_colors):
+            # Penalize adjacent nodes having the same color
+            bqm.add_interaction((u, color), (v, color), 2)
+    
+    return bqm
 
-    return cqm
+def run_simulated_annealing(bqm):
+    """Solve BQM using simulated annealing."""
 
-def run_hybrid_solver(cqm):
-    """Solve CQM using hybrid solver."""
+    print("\nRunning simulated annealing sampler...")
 
-    print("\nRunning hybrid sampler...")
+    # Initialize the simulated annealing solver
+    sampler = SimulatedAnnealingSampler()
+    
+    # Solve the problem using the simulated annealing
+    # Run multiple sweeps to improve solution quality
+    sampleset = sampler.sample(bqm, num_reads=100)
+    
+    # Get the lowest-energy sample
+    sample = sampleset.first.sample
+    
+    # Process the sample to get node colors
+    node_colors = {}
+    for (node, color), value in sample.items():
+        if value == 1:  # If this color is selected for this node
+            node_colors[node] = color
+    
+    # Verify solution - every node should have exactly one color
+    for node in bqm.variables:
+        if node[0] not in node_colors:
+            print(f"Warning: Node {node[0]} has no color assigned!")
+    
+    return node_colors
 
-    # Initialize the CQM solver
-    sampler = LeapHybridCQMSampler()
-
-    # Solve the problem using the CQM solver
-    sampleset = sampler.sample_cqm(cqm, label='Example - Graph Coloring')
-    feasible_sampleset = sampleset.filter(lambda row: row.is_feasible)
-
-    try:
-        sample = feasible_sampleset.first.sample
-    except:
-        print("\nNo feasible solutions found.")
-        exit()
-
-    soln = {key[0]: key[1] for key, val in sample.items() if val == 1.0}
-
-    return soln
-
-def plot_soln(sample, pos):
+def plot_soln(sample, pos, G):
     """Plot results and save file.
     
     Args:
@@ -106,13 +132,23 @@ if __name__ == "__main__":
     num_nodes = 50
 
     G, pos = build_graph(num_nodes)
-    num_colors = max(d for _, d in G.degree()) + 1
+    num_colors = max(d for _, d in G.degree()) + 1  # Upper bound on colors needed
+    
+    bqm = build_bqm(G, num_colors)
 
-    cqm = build_cqm(G, num_colors)
+    sample = run_simulated_annealing(bqm)
 
-    sample = run_hybrid_solver(cqm)
+    plot_soln(sample, pos, G)
 
-    plot_soln(sample, pos)
-
-    colors_used = max(sample.values())+1
+    colors_used = max(sample.values()) + 1
     print("\nColors used:", colors_used, "\n")
+    
+    # Check if the solution is valid (no adjacent nodes with same color)
+    valid = True
+    for u, v in G.edges:
+        if sample[u] == sample[v]:
+            print(f"Invalid coloring: Nodes {u} and {v} both have color {sample[u]}")
+            valid = False
+    
+    if valid:
+        print("Solution is valid - no adjacent nodes have the same color!")

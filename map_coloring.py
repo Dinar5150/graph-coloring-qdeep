@@ -20,8 +20,8 @@ from descartes import PolygonPatch
 import shapefile
 import matplotlib
 import networkx as nx
-from dimod import ConstrainedQuadraticModel, BinaryQuadraticModel
-from dwave.system import LeapHybridCQMSampler
+from dimod import BinaryQuadraticModel
+from dwave.samplers import SimulatedAnnealingSampler  # For simulated annealing
 
 try:
     import matplotlib.pyplot as plt
@@ -69,47 +69,81 @@ def build_graph(state_neighbors):
 
     return G
 
-def build_cqm(G, num_colors):
-    """Build CQM model."""
+def build_bqm(G, num_colors):
+    """Build BQM model for map coloring.
+    
+    In the BQM formulation:
+    - Each state-color combination is a binary variable
+    - We penalize:
+      1. States without exactly one color
+      2. Adjacent states with the same color
+    """
 
-    print("\nBuilding constrained quadratic model...")
+    print("\nBuilding binary quadratic model...")
 
-    # Initialize the CQM object
-    cqm = ConstrainedQuadraticModel()
+    # Initialize the BQM
+    bqm = BinaryQuadraticModel('BINARY')
+    
+    # Strength of constraints
+    lagrange_one_color = 5.0  # Strength for "one color per state" constraint
+    lagrange_different_colors = 5.0  # Strength for "neighboring states have different colors"
+    
+    # Constraint: Each state must have exactly one color
+    for state in G.nodes():
+        # Each state should have exactly one color
+        # First, add variables for this state
+        state_variables = [(state, color) for color in range(num_colors)]
+        
+        # Linear terms to encourage having at least one color
+        for var in state_variables:
+            bqm.add_variable(var, -lagrange_one_color)
+        
+        # Quadratic terms to penalize having more than one color
+        for i, var1 in enumerate(state_variables):
+            for var2 in state_variables[i+1:]:
+                bqm.add_interaction(var1, var2, 2.0 * lagrange_one_color)
+    
+    # Constraint: Neighboring states cannot have the same color
+    for state1, state2 in G.edges():
+        for color in range(num_colors):
+            # Penalize if both states have the same color
+            bqm.add_interaction((state1, color), (state2, color), lagrange_different_colors)
+    
+    return bqm
 
-    # Add constraint to make variables discrete
-    for n in G.nodes():
-        cqm.add_discrete([(n, i) for i in range(num_colors)])
-  
-    # Build the constraints: edges have different color end points
-    for u, v in G.edges:
-        for i in range(num_colors):
-            c = BinaryQuadraticModel('BINARY')
-            c.set_quadratic((u, i), (v, i), 1)
-            cqm.add_constraint(c == 0)
+def run_simulated_annealing(bqm):
+    """Solve BQM using simulated annealing."""
 
-    return cqm
+    print("\nRunning simulated annealing sampler...")
 
-def run_hybrid_solver(cqm):
-    """Solve CQM using LeapHybridCQMSampler through the cloud."""
-
-    print("\nRunning hybrid sampler...")
-
-    # Initialize the CQM solver
-    sampler = LeapHybridCQMSampler()
-
-    # Solve the problem using the CQM solver
-    sampleset = sampler.sample_cqm(cqm, label='Example - Map Coloring')
-    feasible_sampleset = sampleset.filter(lambda row: row.is_feasible)
-
-    try:
-        sample = feasible_sampleset.first.sample
-    except:
-        print("\nNo feasible solutions found.")
-        exit()
-
-    soln = {key[0]: key[1] for key, val in sample.items() if val == 1.0}
-
+    # Initialize the simulated annealing solver
+    sampler = SimulatedAnnealingSampler()
+    
+    # Solve the problem using simulated annealing
+    # Use multiple reads to improve solution quality
+    sampleset = sampler.sample(bqm, num_reads=100)
+    
+    # Get the lowest-energy sample
+    sample = sampleset.first.sample
+    
+    # Convert the sample to state colors
+    # For each state, find which color variable is set to 1
+    soln = {}
+    for (state, color), value in sample.items():
+        if value == 1:
+            soln[state] = color
+    
+    # Check that every state has exactly one color
+    for state in G.nodes():
+        if state not in soln:
+            print(f"Warning: {state} has no color assigned. Using color 0 as default.")
+            soln[state] = 0
+    
+    # Verify no adjacent states have the same color
+    for state1, state2 in G.edges():
+        if soln[state1] == soln[state2]:
+            print(f"Warning: Adjacent states {state1} and {state2} have the same color {soln[state1]}.")
+    
     return soln
 
 def plot_map(sample, state_records, colors):
@@ -161,14 +195,15 @@ if __name__ == "__main__":
 
     G = build_graph(state_neighbors)
 
-    colors = ['red', 'blue', 'green', 'yellow']
+    colors = ['red', 'yellow', 'blue', 'green']  # Updated colors
     num_colors = 4
 
-    cqm = build_cqm(G, num_colors)
+    bqm = build_bqm(G, num_colors)
 
-    sample = run_hybrid_solver(cqm)
+    sample = run_simulated_annealing(bqm)
 
     plot_map(sample, state_records, colors)
 
     colors_used = max(sample.values())+1
     print("\nColors used:", colors_used, "\n")
+    

@@ -5,6 +5,10 @@
    https://circleci.com/gh/dwave-examples/graph-coloring.svg?style=shield)](
    https://circleci.com/gh/dwave-examples/graph-coloring)
 
+# Important note
+
+This repository is a fork of [D-Wave's original graph-coloring](https://github.com/dwave-examples/graph-coloring). The contributors to this fork do not claim ownership or authorship of the original codebase. All credit for the original work belongs to D-Wave Systems and its respective contributors.
+
 # Graph Coloring
 
 A demo of graph coloring using Leap's hybrid constrained quadratic model (CQM)
